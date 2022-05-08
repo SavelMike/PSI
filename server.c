@@ -87,14 +87,24 @@ int handle_connect(int socket_fd)
 // Can be used to check if message suits CLIENT_USERNAME (max = 20) or CLIENT_MESSAGE (max = 100)
 // return true if yes
 // 		  false otherwise
-_Bool decode_client_text(char* msg, int max) {
-	char* res = strstr(msg, "\a\b");
-	if (res == NULL) {
+_Bool decode_client_text(char* msg, int length, int max, int* textlen) {
+	int i;
+	int len = -1;
+
+	for (i = 0; i < length - 1; i++) {
+		if (msg[i] == '\a' && msg[i + 1] == '\b') {
+			len = i;
+			break;
+		}
+	}
+	if (len == -1) {
 		return false;
 	}
-	if ((res - msg + 2 > max) || (res == msg)) {
+
+	if ((len + 2 > max) || (len == 0)) {
 		return false;
 	}
+	*textlen = len;
 	
 	return true;
 }
@@ -168,6 +178,7 @@ _Bool decode_client_ok(char* msg, int *x, int *y) {
 struct {
 	int state;
 	char name[20];
+	int namelen;
 	int keyid;
 } client_states[FD_SETSIZE];
 
@@ -182,11 +193,11 @@ struct {
 	{18189, 21952}
 };
 
-int get_hash(char* name) {
+int get_hash(char* name, int namelen) {
 	int sum = 0;
 	int i;
 
-	for (i = 0; i < strlen(name); i++) {
+	for (i = 0; i < namelen; i++) {
 		sum += name[i];
 	}
 	sum *= 1000;
@@ -202,28 +213,25 @@ int process_client_msg(int fd, fd_set *fds)
 	char* p;
 	ssize_t rc;
 	
-	rc = read(fd, buf, sizeof(buf) - 1);
+	rc = read(fd, buf, sizeof(buf));
 	if (rc == -1) {
 		perror("read failed");
 		exit(EXIT_FAILURE);
 	}
-	buf[rc] = 0;
-	strcpy(buf2, buf);
-	p = strstr(buf2, "\a\b");
-	if (p != 0) {
-		*p = 0;
-	}
-	printf("rc = %ld: buf = \"%s\", Expect %d\n", rc, buf2, client_states[fd].state);
        
 	if (client_states[fd].state == EXPECT_USERNAME) {
+		int textlen;
+
 		// Check that client send CLIENT_USERNAME message
-		if (!decode_client_text(buf, 20)){
+		if (!decode_client_text(buf, rc, 20, &textlen)){
 			// Not CLIENT_USERNAME
+			printf("Not client username\n");
 			close(fd);
 			FD_CLR(fd, fds);
 			return 0;
 		}
-		strncpy(client_states[fd].name, buf, strlen(buf) - 2);
+		client_states[fd].namelen = textlen;
+		memcpy(client_states[fd].name, buf, textlen);
 		rc = write(fd, SERVER_KEY_REQUEST, strlen(SERVER_KEY_REQUEST));
 		if (rc != strlen(SERVER_KEY_REQUEST)) {
 			close(fd);
@@ -259,7 +267,7 @@ int process_client_msg(int fd, fd_set *fds)
 		}
 		
 		// Compose reply to the client
-		hash = get_hash(client_states[fd].name);
+		hash = get_hash(client_states[fd].name, client_states[fd].namelen);
 		hash += authentification_keys[key_id].server_key;
 		hash %= 65536;
 		sprintf(buf, "%d\a\b", hash);
@@ -289,7 +297,7 @@ int process_client_msg(int fd, fd_set *fds)
 		code -= authentification_keys[client_states[fd].keyid].client_key;
 		code %= 65536;
 		
-		if (code != get_hash(client_states[fd].name)) {
+		if (code != get_hash(client_states[fd].name, client_states[fd].namelen)) {
 			// confirmation code is wrong
 			msg = SERVER_LOGIN_FAILED;
 			rc = write(fd, msg, strlen(msg));
@@ -345,7 +353,9 @@ int process_client_msg(int fd, fd_set *fds)
 		return 0;
 	}
 	if (client_states[fd].state == EXPECT_CLIENT_MSG) {
-		if (!decode_client_text(buf, 100)) {
+		int textlen;
+
+		if (!decode_client_text(buf, rc, 100, &textlen)) {
 			// Not CLIENT_TEXT
 			close(fd);
 			FD_CLR(fd, fds);
