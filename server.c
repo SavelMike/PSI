@@ -29,14 +29,14 @@ int start_connect_socket(unsigned short port)
 	}
 
 	/* this is so that on restart the server did not get "Address already in use" */
-/*	opt = 1;
+	opt = 1;
 	rc = setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, (char *)&opt,
 			sizeof(opt));
 	if (rc == -1) {
 		perror("setsockopt failed");
 		exit(EXIT_FAILURE);
 	}
-*/
+
 	/* assign address to the socket */
 	serveraddr.sin_family = AF_INET;
 	serveraddr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -146,26 +146,6 @@ _Bool decode_client_ok(char* msg, int *x, int *y) {
 	return true;
 }
 
-
-
-/*
-int decode_client_msg(char* msg) {
-	if (strcmp(msg, "RECHARGING\a\b") == 0) {
-		return CLIENT_RECHARGING;
-	}
-	if (strcmp(msg, "FULL POWER\a\b") == 0) {
-		return CLIENT_FULL_POWER;
-	}
-	if (msg[0] == 'O' && msg[1] == 'K' && msg[2] == ' ') {
-		if (decode_client_ok(msg)) {
-			return CLIENT_OK;
-		}
-	}
-
-	return CLIENT_UNKNOWN;
-}
-*/
-
 #define SERVER_CONFIRMATION
 #define SERVER_MOVE "102 MOVE\a\b"
 #define SERVER_TURN_LEFT "103 TURN LEFT\a\b"
@@ -265,6 +245,19 @@ int process_client_msg(int fd, fd_set *fds)
 			FD_CLR(fd, fds);
 			return 0;
 		}
+		if (0 > key_id || key_id > 4) {
+			// Key_id out of range
+			rc = write(fd, SERVER_KEY_OUT_OF_RANGE_ERROR, strlen(SERVER_KEY_OUT_OF_RANGE_ERROR));
+			if (rc != strlen(SERVER_KEY_OUT_OF_RANGE_ERROR)) {
+				close(fd);
+				FD_CLR(fd, fds);
+				return 0;
+			}
+			close(fd);
+			FD_CLR(fd, fds);
+			return 0;
+		}
+		
 		// Compose reply to the client
 		hash = get_hash(client_states[fd].name);
 		hash += authentification_keys[key_id].server_key;
