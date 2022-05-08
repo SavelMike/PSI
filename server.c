@@ -77,7 +77,7 @@ int handle_connect(int socket_fd)
 #define CLIENT_USERNAME 1
 #define CLIENT_KEY_ID 2
 #define CLIENT_CONFIRMATION 3
-#define CLIENT_OK 4
+#define CLIENT_OK 4  // OK <x> <y>\a\b
 #define CLIENT_RECHARGING 5
 #define CLIENT_FULL_POWER 6
 #define CLIENT_MESSAGE 7
@@ -127,17 +127,16 @@ _Bool decode_client_keyid_confirm(char* msg, int max, int* key_id) {
 // Check whether msg suits to format "OK <x> <y>\a\b"
 // return true if yes
 // 		  false otherwise
-_Bool decode_client_ok(char* msg) {
-	int x, y;
+_Bool decode_client_ok(char* msg, int *x, int *y) {
 	char* p;
 
-	x = strtol(msg + 3, &p, 10);
-	if (x == 0 && errno == EINVAL) {
+	*x = strtol(msg + 3, &p, 10);
+	if (&x == 0 && errno == EINVAL) {
 		// No decimal number
 		return false;
 	}	
-	y = strtol(p, &p, 10);
-	if (y == 0 && errno == EINVAL) {
+	*y = strtol(p, &p, 10);
+	if (&y == 0 && errno == EINVAL) {
 		return false;
 	}
 	if (p[0] != '\a' || p[1] != '\b') {
@@ -149,7 +148,7 @@ _Bool decode_client_ok(char* msg) {
 
 
 
-
+/*
 int decode_client_msg(char* msg) {
 	if (strcmp(msg, "RECHARGING\a\b") == 0) {
 		return CLIENT_RECHARGING;
@@ -165,6 +164,7 @@ int decode_client_msg(char* msg) {
 
 	return CLIENT_UNKNOWN;
 }
+*/
 
 #define SERVER_CONFIRMATION
 #define SERVER_MOVE "102 MOVE\a\b"
@@ -183,7 +183,8 @@ int decode_client_msg(char* msg) {
 #define EXPECT_USERNAME 1
 #define EXPECT_KEY_ID 2
 #define EXPECT_CONFIRMATION 3
-#define EXPECT_MOVES 4
+#define EXPECT_CLIENT_OK 4
+#define EXPECT_CLIENT_MSG 5
 struct {
 	int state;
 	char name[20];
@@ -284,32 +285,84 @@ int process_client_msg(int fd, fd_set *fds)
 			FD_CLR(fd, fds);
 			return 0;
 		}
-       		// Check confirmation code
+       		// Check confirmation code: restore hash value
 		code += 65536;
-		code += authentification_keys[client_states[fd].keyid].client_key;
+		code -= authentification_keys[client_states[fd].keyid].client_key;
 		code %= 65536;
 		
-		if (code == get_hash(client_states[fd].name)) {
-			// confirmation code is ok
-			msg = SERVER_OK;
-			client_states[fd].state = EXPECT_MOVES;
-		} else {
+		if (code != get_hash(client_states[fd].name)) {
+			// confirmation code is wrong
 			msg = SERVER_LOGIN_FAILED;
-			// Don't change expectation, still expect confirmation
+			rc = write(fd, msg, strlen(msg));
+			if (rc != strlen(msg)) {
+				close(fd);
+				FD_CLR(fd, fds);
+				return 0;
+			}
+			return 0;
 		}
 		msg = SERVER_OK;
-
-		printf("Before write\n");
 		rc = write(fd, msg, strlen(msg));
 		if (rc != strlen(msg)) {
 			close(fd);
 			FD_CLR(fd, fds);
 			return 0;
 		}
-		printf("After write\n");
+		// Send first of moves to detect current location
+		rc = write(fd, SERVER_MOVE, strlen(SERVER_MOVE));
+		if (rc != strlen(SERVER_MOVE)) {
+			close(fd);
+			FD_CLR(fd, fds);
+			return 0;
+		}
+		client_states[fd].state = EXPECT_CLIENT_OK;
+
 		return 0;		
 	}
+	if (client_states[fd].state == EXPECT_CLIENT_OK) {
+		int x;
+		int y;
 
+      		if (!decode_client_ok(buf, &x, &y)) {
+			// Not CLIENT_OK
+			close(fd);
+			FD_CLR(fd, fds);
+			return 0;
+		}
+		if (x == 0 && y == 0) {
+			rc = write(fd, SERVER_PICK_UP, strlen(SERVER_PICK_UP));
+			if (rc != strlen(SERVER_PICK_UP)) {
+				close(fd);
+				FD_CLR(fd, fds);
+				return 0;
+			}
+			client_states[fd].state = EXPECT_CLIENT_MSG;
+			return 0;
+		}
+		printf("%d %d\n", x, y);
+		return 0;
+	}
+	if (client_states[fd].state == EXPECT_CLIENT_MSG) {
+		if (!decode_client_text(buf, 100)) {
+			// Not CLIENT_TEXT
+			close(fd);
+			FD_CLR(fd, fds);
+			return 0;
+		}
+		rc = write(fd, SERVER_LOGOUT, strlen(SERVER_LOGOUT));
+		if (rc != strlen(SERVER_LOGOUT)){
+			close(fd);
+			FD_CLR(fd, fds);
+			return 0;
+		}
+		// Done with the the client
+		close(fd);
+		FD_CLR(fd, fds);
+		return 0;
+	}
+
+	// Unknown state
+	printf("Should not be here\n");
 	close(fd);
 	FD_CLR(fd, fds);
 	return 0;
