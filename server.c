@@ -7,6 +7,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <string.h>
+#include <stdbool.h>
+#include <errno.h>
 
 int start_connect_socket(unsigned short port)
 {
@@ -27,14 +29,14 @@ int start_connect_socket(unsigned short port)
 	}
 
 	/* this is so that on restart the server did not get "Address already in use" */
-	opt = 1;
+/*	opt = 1;
 	rc = setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, (char *)&opt,
 			sizeof(opt));
 	if (rc == -1) {
 		perror("setsockopt failed");
 		exit(EXIT_FAILURE);
 	}
-
+*/
 	/* assign address to the socket */
 	serveraddr.sin_family = AF_INET;
 	serveraddr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -72,27 +74,247 @@ int handle_connect(int socket_fd)
 	return rc;
 }
 
+#define CLIENT_USERNAME 1
+#define CLIENT_KEY_ID 2
+#define CLIENT_CONFIRMATION 3
+#define CLIENT_OK 4
+#define CLIENT_RECHARGING 5
+#define CLIENT_FULL_POWER 6
+#define CLIENT_MESSAGE 7
+#define CLIENT_UNKNOWN 8
+
+// Check whether msg suits to format  "<text>\a\b" (text length + 2 <= max)
+// Can be used to check if message suits CLIENT_USERNAME (max = 20) or CLIENT_MESSAGE (max = 100)
+// return true if yes
+// 		  false otherwise
+_Bool decode_client_text(char* msg, int max) {
+	char* res = strstr(msg, "\a\b");
+	if (res == NULL) {
+		return false;
+	}
+	if ((res - msg + 2 > max) || (res == msg)) {
+		return false;
+	}
+	
+	return true;
+}
+
+// Check whether msg suits to format "decimal number\a\b". Decimal num has to be less than max.
+// Can be used to check if message suits CLIENT_CONFIRMATION (max=65535) or CLIENT_KEY_ID (max=999).
+// return true if yes
+// 		  false otherwise 
+_Bool decode_client_keyid_confirm(char* msg, int max, int* key_id) {
+	char* p;
+	int num;
+	
+	num = strtol(msg, &p, 10);
+	if (num == 0 && errno == EINVAL) {
+		return false;
+	}
+	if (num < 0 || num > max) {
+		return false;
+	}
+	if (p[0] != '\a' || p[1] != '\b') {
+		return false;
+	}
+
+	*key_id = num;
+	return true;
+}
+
+
+
+// Check whether msg suits to format "OK <x> <y>\a\b"
+// return true if yes
+// 		  false otherwise
+_Bool decode_client_ok(char* msg) {
+	int x, y;
+	char* p;
+
+	x = strtol(msg + 3, &p, 10);
+	if (x == 0 && errno == EINVAL) {
+		// No decimal number
+		return false;
+	}	
+	y = strtol(p, &p, 10);
+	if (y == 0 && errno == EINVAL) {
+		return false;
+	}
+	if (p[0] != '\a' || p[1] != '\b') {
+		return false;
+	}
+	
+	return true;
+}
+
+
+
+
+int decode_client_msg(char* msg) {
+	if (strcmp(msg, "RECHARGING\a\b") == 0) {
+		return CLIENT_RECHARGING;
+	}
+	if (strcmp(msg, "FULL POWER\a\b") == 0) {
+		return CLIENT_FULL_POWER;
+	}
+	if (msg[0] == 'O' && msg[1] == 'K' && msg[2] == ' ') {
+		if (decode_client_ok(msg)) {
+			return CLIENT_OK;
+		}
+	}
+
+	return CLIENT_UNKNOWN;
+}
+
+#define SERVER_CONFIRMATION
+#define SERVER_MOVE "102 MOVE\a\b"
+#define SERVER_TURN_LEFT "103 TURN LEFT\a\b"
+#define SERVER_TURN_RIGHT "104 TURN RIGHT\a\b"
+#define SERVER_PICK_UP "105 GET MESSAGE\a\b"
+#define SERVER_LOGOUT "106 LOGOUT\a\b"
+#define SERVER_KEY_REQUEST "107 KEY REQUEST\a\b"
+#define SERVER_OK "200 OK\a\b"
+#define SERVER_LOGIN_FAILED "300 LOGIN FAILED\a\b"
+#define SERVER_SYNTAX_ERROR "301 SYNTAX ERROR\a\b"
+#define SERVER_LOGIC_ERROR "302 LOGIC ERROR\a\b"
+#define SERVER_KEY_OUT_OF_RANGE_ERROR "303 KEY OUT OF RANGE\a\b"
+
+
+#define EXPECT_USERNAME 1
+#define EXPECT_KEY_ID 2
+#define EXPECT_CONFIRMATION 3
+#define EXPECT_MOVES 4
+struct {
+	int state;
+	char name[20];
+	int keyid;
+} client_states[FD_SETSIZE];
+
+struct {
+	int server_key;
+	int client_key;
+} authentification_keys[5] = {
+	{23019, 32037},
+	{32037, 29295},
+	{18789, 13603},
+	{16443, 29533},
+	{18189, 21952}
+};
+
+int get_hash(char* name) {
+	int sum = 0;
+	int i;
+
+	for (i = 0; i < strlen(name); i++) {
+		sum += name[i];
+	}
+	sum *= 1000;
+	sum %= 65536;
+
+	return sum;
+}
+
 int process_client_msg(int fd, fd_set *fds)
 {
 	char buf[1024];
-	ssize_t readrc;
-
-	readrc = read(fd, buf, sizeof(buf) - 1);
-	if (readrc == -1) {
+	ssize_t rc;
+	
+	rc = read(fd, buf, sizeof(buf) - 1);
+	if (rc == -1) {
 		perror("read failed");
 		exit(EXIT_FAILURE);
 	}
-	buf[readrc] = 0;
+	buf[rc] = 0;
+	printf("%s, Expect %d\n", buf, client_states[fd].state);
+       
+	if (client_states[fd].state == EXPECT_USERNAME) {
+		// Check that client send CLIENT_USERNAME message
+		if (!decode_client_text(buf, 20)){
+			// Not CLIENT_USERNAME
+			close(fd);
+			FD_CLR(fd, fds);
+			return 0;
+		}
+		strncpy(client_states[fd].name, buf, strlen(buf) - 2);
+		rc = write(fd, SERVER_KEY_REQUEST, strlen(SERVER_KEY_REQUEST));
+		if (rc != strlen(SERVER_KEY_REQUEST)) {
+			close(fd);
+			FD_CLR(fd, fds);
+			return 0;
+		}
+		client_states[fd].state = EXPECT_KEY_ID;
 
-	if (!strcmp(buf, "quit\r\n")) {
-		close(fd);
-		FD_CLR(fd, fds);
-		printf("closed connection from %d\n", fd);
-	} else {
-		printf("received from client %d: %s", fd, buf);
+		return 0;
 	}
+
+	if (client_states[fd].state == EXPECT_KEY_ID) {
+		int hash;
+		int key_id;
+
+		if (!decode_client_keyid_confirm(buf, 999, &key_id)) {
+			// Not CLIENT_KEY_ID
+			close(fd);
+			FD_CLR(fd, fds);
+			return 0;
+		}
+		// Compose reply to the client
+		hash = get_hash(client_states[fd].name);
+		hash += authentification_keys[key_id].server_key;
+		hash %= 65536;
+		sprintf(buf, "%d\a\b", hash);
+		rc = write(fd, buf, strlen(buf));
+		if (rc != strlen(buf)) {
+			close(fd);
+			FD_CLR(fd, fds);
+			return 0;
+		}
+		client_states[fd].state = EXPECT_CONFIRMATION;
+		client_states[fd].keyid = key_id;
+		return 0;
+	}
+
+	if (client_states[fd].state == EXPECT_CONFIRMATION) {
+		int code;
+		char* msg;
+
+		printf("Decode\n");
+		if (!decode_client_keyid_confirm(buf,65535, &code)) {
+			// Not CLIENT_CONFIRMATION
+			close(fd);
+			FD_CLR(fd, fds);
+			return 0;
+		}
+       		// Check confirmation code
+		code += 65536;
+		code += authentification_keys[client_states[fd].keyid].client_key;
+		code %= 65536;
+		
+		if (code == get_hash(client_states[fd].name)) {
+			// confirmation code is ok
+			msg = SERVER_OK;
+			client_states[fd].state = EXPECT_MOVES;
+		} else {
+			msg = SERVER_LOGIN_FAILED;
+			// Don't change expectation, still expect confirmation
+		}
+		msg = SERVER_OK;
+
+		printf("Before write\n");
+		rc = write(fd, msg, strlen(msg));
+		if (rc != strlen(msg)) {
+			close(fd);
+			FD_CLR(fd, fds);
+			return 0;
+		}
+		printf("After write\n");
+		return 0;		
+	}
+
+	close(fd);
+	FD_CLR(fd, fds);
 	return 0;
 }
+
 
 int main(void)
 {
@@ -101,6 +323,7 @@ int main(void)
 	fd_set fds;
 	fd_set selectfds;
 	int i;
+	
 
 	socket_fd = start_connect_socket(5555);
 
@@ -126,6 +349,7 @@ int main(void)
 				/* connect request */
 				rc = handle_connect(socket_fd);
 				FD_SET(rc, &fds);
+				client_states[rc].state = EXPECT_USERNAME;
 				continue;
 			}
 
