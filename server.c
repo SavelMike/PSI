@@ -218,6 +218,8 @@ int get_hash(char* name) {
 int process_client_msg(int fd, fd_set *fds)
 {
 	char buf[1024];
+	char buf2[1024];
+	char* p;
 	ssize_t rc;
 	
 	rc = read(fd, buf, sizeof(buf) - 1);
@@ -226,7 +228,12 @@ int process_client_msg(int fd, fd_set *fds)
 		exit(EXIT_FAILURE);
 	}
 	buf[rc] = 0;
-	printf("%s, Expect %d\n", buf, client_states[fd].state);
+	strcpy(buf2, buf);
+	p = strstr(buf2, "\a\b");
+	if (p != 0) {
+		*p = 0;
+	}
+	printf("rc = %ld: buf = \"%s\", Expect %d\n", rc, buf2, client_states[fd].state);
        
 	if (client_states[fd].state == EXPECT_USERNAME) {
 		// Check that client send CLIENT_USERNAME message
@@ -244,7 +251,7 @@ int process_client_msg(int fd, fd_set *fds)
 			return 0;
 		}
 		client_states[fd].state = EXPECT_KEY_ID;
-
+		printf("%s\n", client_states[fd].name);
 		return 0;
 	}
 
@@ -278,7 +285,6 @@ int process_client_msg(int fd, fd_set *fds)
 		int code;
 		char* msg;
 
-		printf("Decode\n");
 		if (!decode_client_keyid_confirm(buf,65535, &code)) {
 			// Not CLIENT_CONFIRMATION
 			close(fd);
@@ -299,6 +305,9 @@ int process_client_msg(int fd, fd_set *fds)
 				FD_CLR(fd, fds);
 				return 0;
 			}
+			// Close connection
+			close(fd);
+			FD_CLR(fd, fds);
 			return 0;
 		}
 		msg = SERVER_OK;
@@ -339,7 +348,7 @@ int process_client_msg(int fd, fd_set *fds)
 			client_states[fd].state = EXPECT_CLIENT_MSG;
 			return 0;
 		}
-		printf("%d %d\n", x, y);
+		printf("Client ok %d %d\n", x, y);
 		return 0;
 	}
 	if (client_states[fd].state == EXPECT_CLIENT_MSG) {
