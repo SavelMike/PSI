@@ -28,7 +28,7 @@ int start_connect_socket(unsigned short port)
 		exit(EXIT_FAILURE);
 	}
 
-	/* this is so that on restart the server did not get "Address already in use" */
+	/* this is so that on restart the server did not get bind failure with "Address already in use" */
 	opt = 1;
 	rc = setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, (char *)&opt,
 			sizeof(opt));
@@ -175,11 +175,23 @@ _Bool decode_client_ok(char* msg, int *x, int *y) {
 #define EXPECT_CONFIRMATION 3
 #define EXPECT_CLIENT_OK 4
 #define EXPECT_CLIENT_MSG 5
+
+#define DIRECTION_RIGHT 1
+#define DIRECTION_LEFT 2
+#define DIRECTION_UP 3
+#define DIRECTION_DOWN 4
+#define DIRECTION_UNKNOWN 5
+#define X_UNKNOWN 6
+#define Y_UNKNOWN 7
+
 struct {
 	int state;
 	char name[20];
 	int namelen;
 	int keyid;
+	int x;
+	int y;
+	int direction;
 } client_states[FD_SETSIZE];
 
 struct {
@@ -204,6 +216,162 @@ int get_hash(char* name, int namelen) {
 	sum %= 65536;
 
 	return sum;
+}
+
+int next_step(int fd) {
+	ssize_t rc;
+	char* msg;
+	if (client_states[fd].x == 0 && client_states[fd].y > 0) {
+		// Have to go down
+		switch (client_states[fd].direction) {
+		case DIRECTION_DOWN:
+			msg = SERVER_MOVE;
+			break;
+		case DIRECTION_UP:	
+			msg = SERVER_TURN_LEFT;
+			client_states[fd].direction = DIRECTION_LEFT;
+			break;
+		case DIRECTION_LEFT:
+			msg = SERVER_TURN_LEFT;
+			client_states[fd].direction = DIRECTION_DOWN;
+			break;
+		case DIRECTION_RIGHT:
+			msg = SERVER_TURN_RIGHT;
+			client_states[fd].direction = DIRECTION_DOWN;
+			break;
+		}	
+	} else if (client_states[fd].x == 0 && client_states[fd].y < 0) {
+		// Have to go up
+		switch(client_states[fd].direction) {
+		case DIRECTION_UP:
+			msg = SERVER_MOVE;
+			break;
+		case DIRECTION_DOWN:
+			msg = SERVER_TURN_RIGHT;
+			client_states[fd].direction = DIRECTION_LEFT;
+			break;
+		case DIRECTION_LEFT:
+			msg = SERVER_TURN_RIGHT;
+			client_states[fd].direction = DIRECTION_UP;
+			break;
+		case DIRECTION_RIGHT:
+			msg = SERVER_TURN_LEFT;
+			client_states[fd].direction = DIRECTION_UP;
+			break;
+		}
+	} else if (client_states[fd].y == 0 && client_states[fd].x > 0) {
+		// Have to go left
+		switch (client_states[fd].direction) {
+		case DIRECTION_LEFT:
+			msg = SERVER_MOVE;
+			break;
+		case DIRECTION_UP:
+			msg = SERVER_TURN_LEFT;
+			client_states[fd].direction = DIRECTION_LEFT;
+			break;
+		case DIRECTION_RIGHT:
+			msg = SERVER_TURN_RIGHT;
+			client_states[fd].direction = DIRECTION_DOWN;
+			break;
+		case DIRECTION_DOWN:
+			msg = SERVER_TURN_RIGHT;
+			client_states[fd].direction = DIRECTION_LEFT;
+			break;
+		}
+	} else if (client_states[fd].y == 0 && client_states[fd].x < 0) {
+		// Have to go right
+		switch (client_states[fd].direction) {
+		case DIRECTION_RIGHT:
+			msg = SERVER_MOVE;
+			break;
+		case DIRECTION_UP:
+			msg = SERVER_TURN_RIGHT;
+			client_states[fd].direction = DIRECTION_RIGHT;
+			break;
+		case DIRECTION_LEFT:
+			msg = SERVER_TURN_LEFT;
+			client_states[fd].direction = DIRECTION_DOWN;
+			break;
+	    	case DIRECTION_DOWN:
+			msg = SERVER_TURN_LEFT;
+			client_states[fd].direction = DIRECTION_RIGHT;
+			break;
+		}
+	} else if (client_states[fd].x > 0 && client_states[fd].y > 0) {
+		// Have to go to left or down
+		switch (client_states[fd].direction) {
+		case DIRECTION_LEFT:
+		case DIRECTION_DOWN:
+			msg = SERVER_MOVE;
+			break;
+		case DIRECTION_RIGHT:
+			msg = SERVER_TURN_RIGHT;
+			client_states[fd].direction = DIRECTION_DOWN;
+			break;
+		case DIRECTION_UP:
+			msg = SERVER_TURN_LEFT;
+			client_states[fd].direction = DIRECTION_LEFT;
+			break;
+		}
+	} else if (client_states[fd].x > 0 && client_states[fd].y < 0) {
+		// Have to go left or up
+		switch (client_states[fd].direction) {
+		case DIRECTION_LEFT:
+		case DIRECTION_UP:
+			msg = SERVER_MOVE;
+			break;
+		case DIRECTION_RIGHT:
+			msg = SERVER_TURN_LEFT;
+			client_states[fd].direction = DIRECTION_UP;
+			break;
+		case DIRECTION_DOWN:
+			msg = SERVER_TURN_RIGHT;
+			client_states[fd].direction = DIRECTION_LEFT;
+			break;
+		}
+	} else if (client_states[fd].x < 0 && client_states[fd].y > 0) {
+		// Have to go right or down
+		switch (client_states[fd].direction) {
+		case DIRECTION_RIGHT:
+		case DIRECTION_DOWN:
+			msg = SERVER_MOVE;
+			break;
+		case DIRECTION_LEFT:
+			msg = SERVER_TURN_LEFT;
+			client_states[fd].direction = DIRECTION_DOWN;
+			break;
+		case DIRECTION_UP:
+			msg = SERVER_TURN_RIGHT;
+			client_states[fd].direction = DIRECTION_RIGHT;
+			break;
+		}
+	} else if (client_states[fd].x < 0 && client_states[fd].y < 0) {
+		// Have to go up or right
+		switch (client_states[fd].direction) {
+		case DIRECTION_UP:
+		case DIRECTION_RIGHT:
+			msg = SERVER_MOVE;
+			break;
+		case DIRECTION_LEFT:
+			msg = SERVER_TURN_RIGHT;
+			client_states[fd].direction = DIRECTION_UP;
+			break;
+		case DIRECTION_DOWN:
+			msg = SERVER_TURN_LEFT;
+			client_states[fd].direction = DIRECTION_RIGHT;
+			break;
+		}
+	} else {
+		printf("Should not be here\n");
+		exit(1);
+	}
+
+	rc = write(fd, msg, strlen(msg));
+	if (rc != strlen(msg)) {
+		return 1;
+	}
+
+	return 0;
 }
 
 int process_client_msg(int fd, fd_set *fds)
@@ -318,6 +486,11 @@ int process_client_msg(int fd, fd_set *fds)
 			FD_CLR(fd, fds);
 			return 0;
 		}
+		// Initialize unknown position and orientation
+		client_states[fd].x = X_UNKNOWN;
+		client_states[fd].y = Y_UNKNOWN;
+		client_states[fd].direction = DIRECTION_UNKNOWN;
+		
 		// Send first of moves to detect current location
 		rc = write(fd, SERVER_MOVE, strlen(SERVER_MOVE));
 		if (rc != strlen(SERVER_MOVE)) {
@@ -326,7 +499,7 @@ int process_client_msg(int fd, fd_set *fds)
 			return 0;
 		}
 		client_states[fd].state = EXPECT_CLIENT_OK;
-
+      
 		return 0;		
 	}
 	if (client_states[fd].state == EXPECT_CLIENT_OK) {
@@ -349,6 +522,54 @@ int process_client_msg(int fd, fd_set *fds)
 			client_states[fd].state = EXPECT_CLIENT_MSG;
 			return 0;
 		}
+		if (client_states[fd].x == X_UNKNOWN) {
+			// Position and orientation were unknown, now pos is known
+			client_states[fd].x = x;
+			client_states[fd].y = y;
+			rc = write(fd, SERVER_MOVE, strlen(SERVER_MOVE));
+			if (rc != strlen(SERVER_MOVE)){
+				close(fd);
+				FD_CLR(fd, fds);
+				return 0;
+			}
+			// State remains EXPECT_CLIENT_OK
+			return 0;
+		}
+		if (client_states[fd].direction == DIRECTION_UNKNOWN) {
+			if (client_states[fd].x == x && client_states[fd].y == y) {
+				printf("Not ready.\n");
+				exit(1);
+			}
+			if (client_states[fd].x == x) {
+				// Robot orientation is vertical
+				if (client_states[fd].y < y) {
+					// Direction is up
+					client_states[fd].direction = DIRECTION_UP;
+				} else {
+					// Direction is down
+					client_states[fd].direction = DIRECTION_DOWN;
+				}
+			}
+			if (client_states[fd].y == y) {
+				// Robot orientation is horizontal
+				if (client_states[fd].x < x) {
+					// Direction is right
+					client_states[fd].direction = DIRECTION_RIGHT;
+				} else {
+					// Direction is left
+					client_states[fd].direction = DIRECTION_LEFT;
+				}
+			}
+		}
+		// Update coordinates
+		client_states[fd].x = x;
+		client_states[fd].y = y;
+ 		if (next_step(fd) != 0) {
+			close(fd);
+			FD_CLR(fd, fds);
+			return 0;
+		}
+		
 		printf("Client ok %d %d\n", x, y);
 		return 0;
 	}
@@ -391,7 +612,8 @@ int main(void)
 	
 
 	socket_fd = start_connect_socket(5555);
-
+	printf("%d\n", socket_fd);
+	
 	FD_ZERO(&fds);
 	/* initially fd set contains only connect socket */
 	FD_SET(socket_fd, &fds);
