@@ -74,6 +74,22 @@ int handle_connect(int socket_fd)
 	return rc;
 }
 
+
+int has_terminator(char* msg, int length) {
+	int i;
+	int len = -1;
+
+	for (i = 0; i < length - 1; i++) {
+		if (msg[i] == '\a' && msg[i + 1] == '\b') {
+			len = i;
+			break;
+		}
+	}
+
+	return len;
+}
+
+
 #define CLIENT_USERNAME 1
 #define CLIENT_KEY_ID 2
 #define CLIENT_CONFIRMATION 3
@@ -89,14 +105,9 @@ int handle_connect(int socket_fd)
 // 		  false otherwise
 _Bool decode_client_text(char* msg, int length, int max, int* textlen) {
 	int i;
-	int len = -1;
+	int len;
 
-	for (i = 0; i < length - 1; i++) {
-		if (msg[i] == '\a' && msg[i + 1] == '\b') {
-			len = i;
-			break;
-		}
-	}
+	len = has_terminator(msg, length);
 	if (len == -1) {
 		return false;
 	}
@@ -192,6 +203,8 @@ struct {
 	int x;
 	int y;
 	int direction;
+	char client_msg[100];
+	int cur_size;
 } client_states[FD_SETSIZE];
 
 struct {
@@ -374,24 +387,69 @@ int next_step(int fd) {
 	return 0;
 }
 
+#define MSG_COMPLETE 1
+#define MSG_INCOMPLETE 2
+#define MSG_WRONG 3
+int is_complete(char* buf, ssize_t size, int fd, int* tail_size) {
+	int len;
+	int i;
+	int old_len;
+
+	old_len = client_states[fd].cur_size;
+	for (i = 0; i < size; i++) {
+		if (old_len + i == 100) {
+			return MSG_WRONG;
+		}
+		client_states[fd].client_msg[old_len + i] = buf[i];
+		client_states[fd].cur_size++;
+		if (buf[i] == '\b') {
+			// Check previous char
+			if (i + old_len != 0 && client_states[fd].client_msg[old_len + i - 1] == '\a') {
+				// \a\b at the end
+				*tail_size = size - (i + 1);
+				
+				return MSG_COMPLETE;
+			}
+		}
+	}
+
+	return MSG_INCOMPLETE;
+}
+
 int process_client_msg(int fd, fd_set *fds)
 {
 	char buf[1024];
-	char buf2[1024];
 	char* p;
+	char* msg;
 	ssize_t rc;
+	int tail_size;
+	char* tail;
 	
 	rc = read(fd, buf, sizeof(buf));
 	if (rc == -1) {
 		perror("read failed");
 		exit(EXIT_FAILURE);
 	}
+	// Check wether message is complete
+	switch (is_complete(buf, rc, fd, &tail_size)) {
+	case MSG_WRONG:
+		close(fd);
+		FD_CLR(fd, fds);
+		return 0;
+	case MSG_INCOMPLETE:
+		return 0;
+	case MSG_COMPLETE:
+		tail = buf + rc - tail_size;
+		break;
+	}
+	msg = client_states[fd].client_msg;
+	rc = client_states[fd].cur_size;
        
 	if (client_states[fd].state == EXPECT_USERNAME) {
 		int textlen;
 
 		// Check that client send CLIENT_USERNAME message
-		if (!decode_client_text(buf, rc, 20, &textlen)){
+		if (!decode_client_text(msg, rc, 20, &textlen)){
 			// Not CLIENT_USERNAME
 			printf("Not client username\n");
 			close(fd);
@@ -399,7 +457,7 @@ int process_client_msg(int fd, fd_set *fds)
 			return 0;
 		}
 		client_states[fd].namelen = textlen;
-		memcpy(client_states[fd].name, buf, textlen);
+		memcpy(client_states[fd].name, msg, textlen);
 		rc = write(fd, SERVER_KEY_REQUEST, strlen(SERVER_KEY_REQUEST));
 		if (rc != strlen(SERVER_KEY_REQUEST)) {
 			close(fd);
@@ -408,14 +466,18 @@ int process_client_msg(int fd, fd_set *fds)
 		}
 		client_states[fd].state = EXPECT_KEY_ID;
 		printf("%s\n", client_states[fd].name);
+		memcpy(client_states[fd].client_msg, tail, tail_size);
+		client_states[fd].cur_size = tail_size;
+
 		return 0;
 	}
 
 	if (client_states[fd].state == EXPECT_KEY_ID) {
 		int hash;
 		int key_id;
+		char tmp[128];
 
-		if (!decode_client_keyid_confirm(buf, 999, &key_id)) {
+		if (!decode_client_keyid_confirm(msg, 999, &key_id)) {
 			// Not CLIENT_KEY_ID
 			close(fd);
 			FD_CLR(fd, fds);
@@ -438,23 +500,26 @@ int process_client_msg(int fd, fd_set *fds)
 		hash = get_hash(client_states[fd].name, client_states[fd].namelen);
 		hash += authentification_keys[key_id].server_key;
 		hash %= 65536;
-		sprintf(buf, "%d\a\b", hash);
-		rc = write(fd, buf, strlen(buf));
-		if (rc != strlen(buf)) {
+		sprintf(tmp, "%d\a\b", hash);
+		rc = write(fd, tmp, strlen(tmp));
+		if (rc != strlen(tmp)) {
 			close(fd);
 			FD_CLR(fd, fds);
 			return 0;
 		}
 		client_states[fd].state = EXPECT_CONFIRMATION;
 		client_states[fd].keyid = key_id;
+		memcpy(client_states[fd].client_msg, tail, tail_size);
+		client_states[fd].cur_size = tail_size;
+
 		return 0;
 	}
 
 	if (client_states[fd].state == EXPECT_CONFIRMATION) {
 		int code;
-		char* msg;
+		char* tmp;
 
-		if (!decode_client_keyid_confirm(buf,65535, &code)) {
+		if (!decode_client_keyid_confirm(msg,65535, &code)) {
 			// Not CLIENT_CONFIRMATION
 			close(fd);
 			FD_CLR(fd, fds);
@@ -467,9 +532,9 @@ int process_client_msg(int fd, fd_set *fds)
 		
 		if (code != get_hash(client_states[fd].name, client_states[fd].namelen)) {
 			// confirmation code is wrong
-			msg = SERVER_LOGIN_FAILED;
-			rc = write(fd, msg, strlen(msg));
-			if (rc != strlen(msg)) {
+			tmp = SERVER_LOGIN_FAILED;
+			rc = write(fd, tmp, strlen(tmp));
+			if (rc != strlen(tmp)) {
 				close(fd);
 				FD_CLR(fd, fds);
 				return 0;
@@ -479,9 +544,9 @@ int process_client_msg(int fd, fd_set *fds)
 			FD_CLR(fd, fds);
 			return 0;
 		}
-		msg = SERVER_OK;
-		rc = write(fd, msg, strlen(msg));
-		if (rc != strlen(msg)) {
+		tmp = SERVER_OK;
+		rc = write(fd, tmp, strlen(tmp));
+		if (rc != strlen(tmp)) {
 			close(fd);
 			FD_CLR(fd, fds);
 			return 0;
@@ -499,6 +564,8 @@ int process_client_msg(int fd, fd_set *fds)
 			return 0;
 		}
 		client_states[fd].state = EXPECT_CLIENT_OK;
+		memcpy(client_states[fd].client_msg, tail, tail_size);
+		client_states[fd].cur_size = tail_size;
       
 		return 0;		
 	}
@@ -506,7 +573,7 @@ int process_client_msg(int fd, fd_set *fds)
 		int x;
 		int y;
 
-      		if (!decode_client_ok(buf, &x, &y)) {
+      		if (!decode_client_ok(msg, &x, &y)) {
 			// Not CLIENT_OK
 			close(fd);
 			FD_CLR(fd, fds);
@@ -520,6 +587,9 @@ int process_client_msg(int fd, fd_set *fds)
 				return 0;
 			}
 			client_states[fd].state = EXPECT_CLIENT_MSG;
+			memcpy(client_states[fd].client_msg, tail, tail_size);
+			client_states[fd].cur_size = tail_size;
+      
 			return 0;
 		}
 		if (client_states[fd].x == X_UNKNOWN) {
@@ -533,6 +603,9 @@ int process_client_msg(int fd, fd_set *fds)
 				return 0;
 			}
 			// State remains EXPECT_CLIENT_OK
+			memcpy(client_states[fd].client_msg, tail, tail_size);
+			client_states[fd].cur_size = tail_size;
+
 			return 0;
 		}
 		if (client_states[fd].direction == DIRECTION_UNKNOWN) {
@@ -571,12 +644,15 @@ int process_client_msg(int fd, fd_set *fds)
 		}
 		
 		printf("Client ok %d %d\n", x, y);
+		memcpy(client_states[fd].client_msg, tail, tail_size);
+		client_states[fd].cur_size = tail_size;
+			
 		return 0;
 	}
 	if (client_states[fd].state == EXPECT_CLIENT_MSG) {
 		int textlen;
 
-		if (!decode_client_text(buf, rc, 100, &textlen)) {
+		if (!decode_client_text(msg, rc, 100, &textlen)) {
 			// Not CLIENT_TEXT
 			close(fd);
 			FD_CLR(fd, fds);
@@ -637,6 +713,7 @@ int main(void)
 				rc = handle_connect(socket_fd);
 				FD_SET(rc, &fds);
 				client_states[rc].state = EXPECT_USERNAME;
+				client_states[rc].cur_size = 0;
 				continue;
 			}
 
