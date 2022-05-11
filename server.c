@@ -689,6 +689,7 @@ int process_client_msg(int fd, fd_set *fds)
 
 int main(void)
 {
+	struct timeval timeout;
 	int socket_fd;
 	int rc;
 	fd_set fds;
@@ -706,23 +707,38 @@ int main(void)
 		/* reinitialize selectfds with active sockets */
 		selectfds = fds;
 		/* wait until input arrives on sockets in selectfds set */
-		rc = select(FD_SETSIZE, &selectfds, NULL, NULL, NULL);
+		timeout.tv_sec = 1;
+		timeout.tv_usec = 0;
+		rc = select(FD_SETSIZE, &selectfds, NULL, NULL, &timeout);
 		if (rc == -1) {
 			perror("select failed");
 			return 1;
+		}
+		if (rc == 0) {
+			// Select timed out, close all connections except socket_fd
+			for (i = 0; i < FD_SETSIZE; i++) {
+				if (!FD_ISSET(i, &fds) || i == socket_fd) {
+					continue;
+				}
+				close(i);
+				FD_CLR(i, &fds);
+			}
+			continue;
 		}
 
 		/* check all sockets for which input is pending for processing */
 		for (i = 0; i < FD_SETSIZE; i++) {
 			if (!FD_ISSET (i, &selectfds))
 				continue;
-
+			
 			if (i == socket_fd) {
-				/* connect request */
-				rc = handle_connect(socket_fd);
-				FD_SET(rc, &fds);
-				client_states[rc].state = EXPECT_USERNAME;
-				client_states[rc].cur_size = 0;
+				int fd;
+
+                                /* connect request */
+				fd = handle_connect(socket_fd);
+				FD_SET(fd, &fds);
+				client_states[fd].state = EXPECT_USERNAME;
+				client_states[fd].cur_size = 0;
 				continue;
 			}
 
