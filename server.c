@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <errno.h>
+#include <limits.h>
 
 int start_connect_socket(unsigned short port)
 {
@@ -191,9 +192,29 @@ _Bool decode_client_ok(char* msg, int *x, int *y) {
 #define DIRECTION_UP 3
 #define DIRECTION_DOWN 4
 #define DIRECTION_UNKNOWN 5
-#define X_UNKNOWN 6
-#define Y_UNKNOWN 7
+#define X_UNKNOWN INT_MAX
+#define Y_UNKNOWN INT_MAX
 
+char* bypass_turn_left[8] = {
+	SERVER_TURN_LEFT,
+	SERVER_MOVE,
+	SERVER_TURN_RIGHT,
+	SERVER_MOVE,
+	SERVER_MOVE,
+	SERVER_TURN_RIGHT,
+	SERVER_MOVE,
+	SERVER_TURN_LEFT
+};
+char* bypass_turn_right[8] = {
+	SERVER_TURN_RIGHT,
+	SERVER_MOVE,
+	SERVER_TURN_LEFT,
+	SERVER_MOVE,
+	SERVER_MOVE,
+	SERVER_TURN_LEFT,
+	SERVER_MOVE,
+	SERVER_TURN_RIGHT
+};
 struct {
 	int state;
 	char name[20];
@@ -204,6 +225,11 @@ struct {
 	int direction;
 	char client_msg[100];
 	int cur_size;
+	int did_turn; // did turn during orientation detection
+	int was_move; // flag is set to 1 during SERVER_MOVE
+	int in_bypass;
+	int bypass_cmd;
+	char** bypass_cmds;
 } client_states[FD_SETSIZE];
 
 struct {
@@ -383,6 +409,8 @@ int next_step(int fd) {
 		return 1;
 	}
 
+	client_states[fd].was_move = !strcmp(SERVER_MOVE, msg);
+	
 	return 0;
 }
 
@@ -428,6 +456,20 @@ void print_client_msg(char* tail, int tail_size) {
 	printf("\n");
 }
 
+int start_bypass_turn_right(int fd) {
+	printf("I am here1\n");
+	client_states[fd].bypass_cmds = bypass_turn_right;
+	client_states[fd].bypass_cmd = 0;
+	client_states[fd].in_bypass = 1;
+}
+
+int start_bypass_turn_left(int fd) {
+	printf("I am here2\n");
+	client_states[fd].bypass_cmds = bypass_turn_left;
+	client_states[fd].bypass_cmd = 0;
+	client_states[fd].in_bypass = 1;
+}
+
 int process_client_msg(int fd, fd_set *fds)
 {
 	char buf[1024];
@@ -462,8 +504,9 @@ int process_client_msg(int fd, fd_set *fds)
 		}
 		cmd = client_states[fd].client_msg;
 		cmd_len = client_states[fd].cur_size;
-		printf("cur_size = %d\n", client_states[fd].cur_size);
-		print_client_msg(cmd, 3);
+
+		print_client_msg(cmd, cmd_len);
+
 		client_states[fd].cur_size = 0;
 		if (client_states[fd].state == EXPECT_USERNAME) {
 			int textlen;
@@ -578,11 +621,13 @@ int process_client_msg(int fd, fd_set *fds)
 				FD_CLR(fd, fds);
 				return 0;
 			}
+			client_states[fd].was_move = 1;
 			client_states[fd].state = EXPECT_CLIENT_OK;
       
 			continue;		
 		}
 		if (client_states[fd].state == EXPECT_CLIENT_OK) {
+			// Client response to MOVE and ROTATE is recieved
 			int x;
 			int y;
 
@@ -593,6 +638,7 @@ int process_client_msg(int fd, fd_set *fds)
 				return 0;
 			}
 			if (x == 0 && y == 0) {
+				// Target is reached
 				rc = write(fd, SERVER_PICK_UP, strlen(SERVER_PICK_UP));
 				if (rc != strlen(SERVER_PICK_UP)) {
 					close(fd);
@@ -613,14 +659,37 @@ int process_client_msg(int fd, fd_set *fds)
 					FD_CLR(fd, fds);
 					return 0;
 				}
+				client_states[fd].was_move = 1;
 				// State remains EXPECT_CLIENT_OK
-			
+				
 				continue;
 			}
 			if (client_states[fd].direction == DIRECTION_UNKNOWN) {
+				// Position is known, orientation is not
 				if (client_states[fd].x == x && client_states[fd].y == y) {
-					printf("Not ready.\n");
-					exit(1);
+                                        // Move did not change position
+					if (client_states[fd].did_turn == 0) {
+						rc = write(fd, SERVER_TURN_RIGHT, strlen(SERVER_TURN_RIGHT));
+						if (rc != strlen(SERVER_TURN_RIGHT)) {
+							close(fd);
+							FD_CLR(fd, fds);
+							return 0;
+						}
+						client_states[fd].did_turn = 1;
+						client_states[fd].was_move = 0;
+					} else {
+						rc = write(fd, SERVER_MOVE, strlen(SERVER_MOVE));
+						if (rc != strlen(SERVER_MOVE)) {
+							close(fd);
+							FD_CLR(fd, fds);
+							return 0;
+						}
+						client_states[fd].was_move = 1;
+					}
+					
+					// State remains EXPE
+//					printf("x = %d, y = %d\n", x, y);
+					continue;
 				}
 				if (client_states[fd].x == x) {
 					// Robot orientation is vertical
@@ -643,9 +712,63 @@ int process_client_msg(int fd, fd_set *fds)
 					}
 				}
 			}
+			printf("x = %d, y = %d\n", x, y);
+			if (client_states[fd].x == x && client_states[fd].y == y &&
+			    client_states[fd].was_move && !client_states[fd].in_bypass) {
+				// Stuck on obstacle
+				
+				switch (client_states[fd].direction) {
+				case DIRECTION_RIGHT:
+					if (y > 0) {
+						start_bypass_turn_right(fd);
+					} else {
+						start_bypass_turn_left(fd);
+					}
+					break;
+				case DIRECTION_LEFT:
+					if (y > 0) {
+						start_bypass_turn_left(fd);
+					} else {
+						start_bypass_turn_right(fd);
+					}
+					break;
+				case DIRECTION_UP:
+					if (x > 0) {
+						start_bypass_turn_left(fd);
+					} else {
+						start_bypass_turn_right(fd);
+					}
+					break;
+				case DIRECTION_DOWN:
+					if (x > 0) {
+						start_bypass_turn_right(fd);
+					} else {
+						start_bypass_turn_left(fd);
+					}
+					break;
+				}
+			}
+			
 			// Update coordinates
 			client_states[fd].x = x;
 			client_states[fd].y = y;
+			if (client_states[fd].in_bypass) {
+				// Continue process of bypassing
+				char* c = client_states[fd].bypass_cmds[client_states[fd].bypass_cmd];
+				printf("Bypass_cmd: %s\n", c);
+				rc = write(fd, c, strlen(c));
+				if (rc != strlen(c)) {
+					close(fd);
+					FD_CLR(fd, fds);
+					return 0;
+				}
+				client_states[fd].bypass_cmd++;
+				if (client_states[fd].bypass_cmd == 8) {
+					client_states[fd].in_bypass = 0;
+					client_states[fd].was_move = 0;
+				}
+				continue;
+			}
 			if (next_step(fd) != 0) {
 				close(fd);
 				FD_CLR(fd, fds);
@@ -737,8 +860,8 @@ int main(void)
                                 /* connect request */
 				fd = handle_connect(socket_fd);
 				FD_SET(fd, &fds);
+				memset(&client_states[fd], 0, sizeof(client_states[fd]));
 				client_states[fd].state = EXPECT_USERNAME;
-				client_states[fd].cur_size = 0;
 				continue;
 			}
 
