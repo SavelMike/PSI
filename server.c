@@ -131,11 +131,13 @@ _Bool decode_client_keyid_confirm(char* msg, int max, int* key_id) {
 	
 	num = strtol(msg, &p, 10);
 	if (num == 0 && errno == EINVAL) {
+		// msg is not decimal number
 		return false;
 	}
 	if (num < 0 || num > max) {
 		return false;
 	}
+
 	if (p[0] != '\a' || p[1] != '\b') {
 		return false;
 	}
@@ -595,6 +597,13 @@ int process_client_msg(int fd, fd_set *fds)
 
 			if (!decode_client_keyid_confirm(cmd, 65535, &code)) {
 				// Not CLIENT_CONFIRMATION
+				printf("%s:%d:%s\n", __FILE__, __LINE__, __FUNCTION__);
+				rc = write(fd, SERVER_SYNTAX_ERROR, strlen(SERVER_SYNTAX_ERROR));
+				if (rc != strlen(SERVER_SYNTAX_ERROR)) {
+					close(fd);
+					FD_CLR(fd, fds);
+					return 0;
+				}
 				close(fd);
 				FD_CLR(fd, fds);
 				return 0;
