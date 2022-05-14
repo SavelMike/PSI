@@ -549,6 +549,12 @@ int process_client_msg(int fd, fd_set *fds)
 
 			if (!decode_client_keyid_confirm(cmd, 999, &key_id)) {
 				// Not CLIENT_KEY_ID
+				rc = write(fd, SERVER_SYNTAX_ERROR, strlen(SERVER_SYNTAX_ERROR));
+				if (rc != strlen(SERVER_SYNTAX_ERROR)) {
+					close(fd);
+					FD_CLR(fd, fds);
+					return 0;
+				}
 				close(fd);
 				FD_CLR(fd, fds);
 				return 0;
