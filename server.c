@@ -184,11 +184,39 @@ _Bool decode_client_ok(char* msg, int *x, int *y) {
 #define SERVER_KEY_OUT_OF_RANGE_ERROR "303 KEY OUT OF RANGE\a\b"
 
 
-#define EXPECT_USERNAME 1
-#define EXPECT_KEY_ID 2
+#define EXPECT_USERNAME 1 // length 20
+#define EXPECT_KEY_ID 2 
 #define EXPECT_CONFIRMATION 3
 #define EXPECT_CLIENT_OK 4
 #define EXPECT_CLIENT_MSG 5
+
+#define USERNAME_MAXLEN 20
+#define KEYID_MAXLEN 5
+#define CONFIRMATION_MAXLEN 7
+#define CLIENT_OK_MAXLEN 12
+#define CLIENTMSG_MAXLEN 100
+
+// input arg:
+//     identifier of expected value
+// return value:
+//     maximal length of message identified by \msg_id
+int clientmsg_maxlen(int msg_id) {
+	switch (msg_id) {
+	case EXPECT_USERNAME:
+		return USERNAME_MAXLEN;
+	case EXPECT_KEY_ID:
+		return KEYID_MAXLEN;
+	case EXPECT_CONFIRMATION:
+		return CONFIRMATION_MAXLEN;
+	case EXPECT_CLIENT_OK:
+		return CLIENT_OK_MAXLEN;
+	case EXPECT_CLIENT_MSG:
+		return CLIENTMSG_MAXLEN;
+	}
+
+	printf("Wrong msg_id\n");
+	exit(1);
+}
 
 #define DIRECTION_RIGHT 1
 #define DIRECTION_LEFT 2
@@ -219,8 +247,6 @@ char* bypass_turn_right[8] = {
 	SERVER_TURN_RIGHT
 };
 
-#define USERNAME_MAXLEN 20
-#define CLIENTMSG_MAXLEN 100
 struct {
 	int state;
 	char name[USERNAME_MAXLEN];
@@ -501,6 +527,17 @@ int process_client_msg(int fd, fd_set *fds)
 			FD_CLR(fd, fds);
 			return 0;
 		case MSG_INCOMPLETE:
+			print_client_msg(client_states[fd].client_msg, client_states[fd].cur_size);
+			if (client_states[fd].cur_size >= clientmsg_maxlen(client_states[fd].state)) {
+				rc = write(fd, SERVER_SYNTAX_ERROR, strlen(SERVER_SYNTAX_ERROR));
+				if (rc != strlen(SERVER_SYNTAX_ERROR)) {
+					close(fd);
+					FD_CLR(fd, fds);
+					return 0;
+				}
+				return 0;
+			}
+			// Wait for command completion
 			return 0;
 		case MSG_COMPLETE:
 			tail = pbuf + bytes - tail_size;
@@ -658,6 +695,12 @@ int process_client_msg(int fd, fd_set *fds)
 
 			if (!decode_client_ok(cmd, &x, &y)) {
 				// Not CLIENT_OK
+				rc = write(fd, SERVER_SYNTAX_ERROR, strlen(SERVER_SYNTAX_ERROR));
+				if (rc != strlen(SERVER_SYNTAX_ERROR)) {
+					close(fd);
+					FD_CLR(fd, fds);
+					return 0;
+				}
 				close(fd);
 				FD_CLR(fd, fds);
 				return 0;
