@@ -432,7 +432,7 @@ int next_step(int fd) {
 			break;
 		}
 	} else {
-		printf("Should not be here\n");
+		printf("Unreachable code\n");
 		exit(1);
 	}
 
@@ -475,34 +475,33 @@ int is_complete(char* buf, ssize_t size, int fd, int* tail_size) {
 	return MSG_INCOMPLETE;
 }
 
-void print_client_msg(char* tail, int tail_size) {
+void print_client_msg(int fd, char* msg, int msg_len) {
 	int i;
 
-	for (i = 0; i < tail_size; i++) {
-		if (isprint(tail[i])) {
-			printf("%c", tail[i]);
+	printf("%d bytes long msg from %d: \"", msg_len, fd);
+	for (i = 0; i < msg_len; i++) {
+		if (isprint(msg[i])) {
+			printf("%c", msg[i]);
 		} else {
-			printf("%d", tail[i]);
+			printf("\\%03o", msg[i]);
 		}
 	}
-	printf(" :length = %d\n", tail_size);
+	printf("\"\n");
 }
 
 int start_bypass_turn_right(int fd) {
-	printf("I am here1\n");
 	client_states[fd].bypass_cmds = bypass_turn_right;
 	client_states[fd].bypass_cmd = 0;
 	client_states[fd].in_bypass = 1;
 }
 
 int start_bypass_turn_left(int fd) {
-	printf("I am here2\n");
 	client_states[fd].bypass_cmds = bypass_turn_left;
 	client_states[fd].bypass_cmd = 0;
 	client_states[fd].in_bypass = 1;
 }
 
-int process_client_msg(int fd, fd_set *fds)
+int handle_client_msg(int fd, fd_set *fds)
 {
 	char buf[1024];
 	char* pbuf;
@@ -527,7 +526,6 @@ int process_client_msg(int fd, fd_set *fds)
 			FD_CLR(fd, fds);
 			return 0;
 		case MSG_INCOMPLETE:
-			print_client_msg(client_states[fd].client_msg, client_states[fd].cur_size);
 			if (client_states[fd].cur_size >= clientmsg_maxlen(client_states[fd].state)) {
 				rc = write(fd, SERVER_SYNTAX_ERROR, strlen(SERVER_SYNTAX_ERROR));
 				if (rc != strlen(SERVER_SYNTAX_ERROR)) {
@@ -548,7 +546,7 @@ int process_client_msg(int fd, fd_set *fds)
 		cmd = client_states[fd].client_msg;
 		cmd_len = client_states[fd].cur_size;
 
-		print_client_msg(cmd, cmd_len);
+		print_client_msg(fd, cmd, cmd_len);
 
 		client_states[fd].cur_size = 0;
 		if (client_states[fd].state == EXPECT_USERNAME) {
@@ -557,7 +555,6 @@ int process_client_msg(int fd, fd_set *fds)
 			// Check that client send CLIENT_USERNAME message
 			if (!decode_client_text(cmd, cmd_len, USERNAME_MAXLEN, &textlen)){
 				// Not CLIENT_USERNAME
-				printf("Not client username\n");
 				rc = write(fd, SERVER_SYNTAX_ERROR, strlen(SERVER_SYNTAX_ERROR));
 				if (rc != strlen(SERVER_SYNTAX_ERROR)) {
 					close(fd);
@@ -577,7 +574,6 @@ int process_client_msg(int fd, fd_set *fds)
 				return 0;
 			}
 			client_states[fd].state = EXPECT_KEY_ID;
-			print_client_msg(client_states[fd].name, textlen);
 			continue;
 		}
 
@@ -634,7 +630,6 @@ int process_client_msg(int fd, fd_set *fds)
 
 			if (!decode_client_keyid_confirm(cmd, 65535, &code)) {
 				// Not CLIENT_CONFIRMATION
-				printf("%s:%d:%s\n", __FILE__, __LINE__, __FUNCTION__);
 				rc = write(fd, SERVER_SYNTAX_ERROR, strlen(SERVER_SYNTAX_ERROR));
 				if (rc != strlen(SERVER_SYNTAX_ERROR)) {
 					close(fd);
@@ -755,8 +750,7 @@ int process_client_msg(int fd, fd_set *fds)
 						client_states[fd].was_move = 1;
 					}
 					
-					// State remains EXPE
-//					printf("x = %d, y = %d\n", x, y);
+					// State remains the same
 					continue;
 				}
 				if (client_states[fd].x == x) {
@@ -780,7 +774,6 @@ int process_client_msg(int fd, fd_set *fds)
 					}
 				}
 			}
-			printf("x = %d, y = %d\n", x, y);
 			if (client_states[fd].x == x && client_states[fd].y == y &&
 			    client_states[fd].was_move && !client_states[fd].in_bypass) {
 				// Stuck on obstacle
@@ -823,7 +816,6 @@ int process_client_msg(int fd, fd_set *fds)
 			if (client_states[fd].in_bypass) {
 				// Continue process of bypassing
 				char* c = client_states[fd].bypass_cmds[client_states[fd].bypass_cmd];
-				printf("Bypass_cmd: %s\n", c);
 				rc = write(fd, c, strlen(c));
 				if (rc != strlen(c)) {
 					close(fd);
@@ -843,8 +835,6 @@ int process_client_msg(int fd, fd_set *fds)
 				return 0;
 			}
 		
-			printf("Client ok %d %d\n", x, y);
-			
 			continue;
 		}
 		if (client_states[fd].state == EXPECT_CLIENT_MSG) {
@@ -869,12 +859,8 @@ int process_client_msg(int fd, fd_set *fds)
 		}
 
 	}
-
-	// Unknown state
-	printf("Should not be here\n");
-	close(fd);
-	FD_CLR(fd, fds);
-	return 0;
+	printf("Unreachable code\n");
+	exit(1);
 }
 
 
@@ -889,7 +875,6 @@ int main(void)
 	
 
 	socket_fd = start_connect_socket(5555);
-	printf("%d\n", socket_fd);
 	
 	FD_ZERO(&fds);
 	/* initially fd set contains only connect socket */
@@ -933,7 +918,7 @@ int main(void)
 				continue;
 			}
 
-			process_client_msg(i, &fds);
+			handle_client_msg(i, &fds);
 		}
 	}
 	/* no way to get here */
