@@ -38,7 +38,7 @@ int start_connect_socket(unsigned short port)
 		exit(EXIT_FAILURE);
 	}
 
-	/* assign address to the socket */
+	/* assign address to the socket to accept connections on any interface (INADDR_ANY) */
 	serveraddr.sin_family = AF_INET;
 	serveraddr.sin_addr.s_addr = htonl(INADDR_ANY);
 	serveraddr.sin_port = htons(port);
@@ -56,6 +56,7 @@ int start_connect_socket(unsigned short port)
 		perror("listen failed");
 		exit(EXIT_FAILURE);
 	}
+
 	return socket_fd;
 }
 
@@ -913,11 +914,14 @@ int main(void)
                                 /* connect request */
 				fd = handle_connect(socket_fd);
 				FD_SET(fd, &fds);
+				// Initialize new client record
 				memset(&client_states[fd], 0, sizeof(client_states[fd]));
+				// Newly connected robot is to sent CLIENT_USERNAME
 				client_states[fd].state = EXPECT_USERNAME;
 				continue;
 			}
 
+			// Process robot message from already connected robot
 			handle_client_msg(i, &fds);
 		}
 	}
