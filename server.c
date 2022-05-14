@@ -101,9 +101,10 @@ int has_terminator(char* msg, int length) {
 #define CLIENT_UNKNOWN 8
 
 // Check whether msg suits to format  "<text>\a\b" (text length + 2 <= max)
-// Can be used to check if message suits CLIENT_USERNAME (max = 20) or CLIENT_MESSAGE (max = 100)
+// Can be used to check if message suits CLIENT_USERNAME (max = USERNAME_MAXLEN) or
+// CLIENT_MESSAGE (max = CLIENTMSG_MAXLEN)
 // return true if yes
-// 		  false otherwise
+// false otherwise
 _Bool decode_client_text(char* msg, int length, int max, int* textlen) {
 	int len;
 
@@ -215,15 +216,18 @@ char* bypass_turn_right[8] = {
 	SERVER_MOVE,
 	SERVER_TURN_RIGHT
 };
+
+#define USERNAME_MAXLEN 20
+#define CLIENTMSG_MAXLEN 100
 struct {
 	int state;
-	char name[20];
+	char name[USERNAME_MAXLEN];
 	int namelen;
 	int keyid;
 	int x;
 	int y;
 	int direction;
-	char client_msg[100];
+	char client_msg[CLIENTMSG_MAXLEN];
 	int cur_size;
 	int did_turn; // did turn during orientation detection
 	int was_move; // flag is set to 1 during SERVER_MOVE
@@ -424,7 +428,7 @@ int is_complete(char* buf, ssize_t size, int fd, int* tail_size) {
 
 	old_len = client_states[fd].cur_size;
 	for (i = 0; i < size; i++) {
-		if (old_len + i == 100) {
+		if (old_len + i == CLIENTMSG_MAXLEN) {
 			return MSG_WRONG;
 		}
 		client_states[fd].client_msg[old_len + i] = buf[i];
@@ -453,7 +457,7 @@ void print_client_msg(char* tail, int tail_size) {
 			printf("%d", tail[i]);
 		}
 	}
-	printf("\n");
+	printf(" :length = %d\n", tail_size);
 }
 
 int start_bypass_turn_right(int fd) {
@@ -512,9 +516,15 @@ int process_client_msg(int fd, fd_set *fds)
 			int textlen;
 
 			// Check that client send CLIENT_USERNAME message
-			if (!decode_client_text(cmd, cmd_len, 20, &textlen)){
+			if (!decode_client_text(cmd, cmd_len, USERNAME_MAXLEN, &textlen)){
 				// Not CLIENT_USERNAME
 				printf("Not client username\n");
+				rc = write(fd, SERVER_SYNTAX_ERROR, strlen(SERVER_SYNTAX_ERROR));
+				if (rc != strlen(SERVER_SYNTAX_ERROR)) {
+					close(fd);
+					FD_CLR(fd, fds);
+					return 0;
+				}
 				close(fd);
 				FD_CLR(fd, fds);
 				return 0;
@@ -782,7 +792,7 @@ int process_client_msg(int fd, fd_set *fds)
 		if (client_states[fd].state == EXPECT_CLIENT_MSG) {
 			int textlen;
 
-			if (!decode_client_text(cmd, cmd_len, 100, &textlen)) {
+			if (!decode_client_text(cmd, cmd_len, CLIENTMSG_MAXLEN, &textlen)) {
 				// Not CLIENT_TEXT
 				close(fd);
 				FD_CLR(fd, fds);
